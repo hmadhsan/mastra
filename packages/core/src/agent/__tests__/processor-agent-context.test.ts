@@ -213,6 +213,7 @@ describe('processor agent context', () => {
 
   it('rehydrates the owning agent for cross-process durable processor memory access', async () => {
     const memory = new MockMemory();
+    let processorAgent: unknown;
     let processorMemory: unknown;
     const baseAgent = new Agent({
       id: 'cross-process-processor-context-agent',
@@ -223,6 +224,7 @@ describe('processor agent context', () => {
         {
           id: 'cross-process-memory-reader',
           processInputStep: async ({ agent }) => {
+            processorAgent = agent;
             processorMemory = await agent?.getMemory();
           },
         },
@@ -252,6 +254,7 @@ describe('processor agent context', () => {
       [PUBSUB_SYMBOL]: pubsub,
     });
 
+    expect(processorAgent).toBe(baseAgent);
     expect(processorMemory).toBe(memory);
   });
 
