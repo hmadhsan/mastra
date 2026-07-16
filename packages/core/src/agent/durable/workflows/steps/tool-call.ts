@@ -143,6 +143,7 @@ async function processChunkThroughOutputProcessors(
       inputProcessors: [],
       outputProcessors: registryEntry.outputProcessors,
       logger,
+      agent: registryEntry.agent,
       agentName,
       processorStates: registryEntry.processorStates,
     });

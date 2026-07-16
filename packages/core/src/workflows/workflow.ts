@@ -658,8 +658,9 @@ function createStepFromTool<TStepInput, TSuspend, TResume, TStepOutput>(
   };
 }
 
-function createStepFromProcessor<TProcessorId extends string>(
+export function createStepFromProcessor<TProcessorId extends string>(
   processor: Processor<TProcessorId>,
+  agent?: Agent<any, any, any, any>,
 ): Step<
   `processor:${TProcessorId}`,
   unknown,
@@ -1016,6 +1017,7 @@ function createStepFromProcessor<TProcessorId extends string>(
 
       const baseContext = {
         abort,
+        agent,
         retryCount: retryCount ?? 0,
         requestContext,
         ...processorObservabilityContext,

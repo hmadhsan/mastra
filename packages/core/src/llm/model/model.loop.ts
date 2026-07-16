@@ -125,6 +125,7 @@ export class MastraLLMVNext extends MastraBase {
     requireToolApproval,
     toolCallConcurrency,
     _internal,
+    agent,
     agentId,
     agentName,
     toolCallId,
@@ -201,6 +202,7 @@ export class MastraLLMVNext extends MastraBase {
 
     try {
       const loopOptions: LoopOptions<Tools, OUTPUT> = {
+        agent,
         mastra: this.#mastra,
         resumeContext,
         runId,

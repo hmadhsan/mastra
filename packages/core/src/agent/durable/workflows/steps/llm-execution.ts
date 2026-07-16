@@ -180,6 +180,7 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
         inputProcessors: resolvedInputProcessors,
         llmRequestInputProcessors: resolvedLlmRequestInputProcessors,
         outputProcessors: resolvedOutputProcessors,
+        agent: resolvedAgent,
       } = resolved;
 
       // 1b. Check for abort signal before doing any work. If the signal is
@@ -370,6 +371,7 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                 outputProcessors: effectiveOutputProcessors,
                 errorProcessors: registryEntry?.errorProcessors ?? [],
                 logger: logger as any,
+                agent: registryEntry?.agent ?? resolvedAgent,
                 agentName: typedInput.agentName ?? typedInput.agentId,
                 processorStates: registryEntry?.processorStates,
               });
@@ -553,6 +555,7 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                     inputProcessors: allInputProcessors,
                     outputProcessors: [],
                     logger: logger as any,
+                    agent: registryEntry?.agent ?? resolvedAgent,
                     agentName: typedInput.agentName ?? typedInput.agentId,
                     processorStates: registryEntry?.processorStates,
                   })
@@ -1301,6 +1304,7 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                     outputProcessors: registryEntryInner.outputProcessors ?? [],
                     errorProcessors: registryEntryInner.errorProcessors,
                     logger: logger as any,
+                    agent: registryEntryInner.agent ?? resolvedAgent,
                     agentName: typedInput.agentName ?? typedInput.agentId,
                     processorStates: registryEntryInner.processorStates,
                   });
@@ -1482,6 +1486,7 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                 inputProcessors: [],
                 outputProcessors: effectiveOutputProcessors,
                 logger: logger as any,
+                agent: registryEntry?.agent ?? resolvedAgent,
                 agentName: typedInput.agentName ?? typedInput.agentId,
                 processorStates: registryEntry?.processorStates,
               });
@@ -1703,6 +1708,7 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                   outputProcessors: registryEntry.outputProcessors ?? [],
                   errorProcessors: registryEntry.errorProcessors,
                   logger: logger as any,
+                  agent: registryEntry.agent ?? resolvedAgent,
                   agentName: typedInput.agentName ?? typedInput.agentId,
                   processorStates: registryEntry.processorStates,
                 });

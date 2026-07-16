@@ -14,6 +14,7 @@ import { RequestContext } from '../../../request-context';
 import { getNeedsApprovalFn } from '../../../tools/toolchecks';
 import type { CoreTool, RequireToolApproval, ToolApprovalContext } from '../../../tools/types';
 import type { Workspace } from '../../../workspace';
+import type { Agent } from '../../agent';
 import { MessageList } from '../../message-list';
 import { SaveQueueManager } from '../../save-queue';
 import { globalRunRegistry } from '../run-registry';
@@ -43,6 +44,8 @@ export interface ResolvedRuntimeDependencies {
   modelList?: RegistryModelListEntry[];
   /** Deserialized MessageList */
   messageList: MessageList;
+  /** Agent reconstructed from the local registry or Mastra instance */
+  agent?: Agent<any, any, any, any>;
   /** Memory instance (if available) */
   memory?: MastraMemory;
   /** SaveQueueManager for message persistence */
@@ -168,6 +171,7 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
   let tools: Record<string, CoreTool> = globalEntry?.tools ?? {};
   let model: MastraLanguageModel = globalEntry?.model as MastraLanguageModel;
   let modelList: RegistryModelListEntry[] | undefined = globalEntry?.modelList;
+  let agent: Agent<any, any, any, any> | undefined = globalEntry?.agent;
   let workspace: Workspace | undefined = globalEntry?.workspace;
   let memory: MastraMemory | undefined = globalEntry?.memory;
   let inputProcessors: InputProcessorOrWorkflow[] | undefined = globalEntry?.inputProcessors;
@@ -184,7 +188,7 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
     logger?.debug?.(`[DurableAgent:${agentId}] Using model and tools from global registry for run ${runId}`);
   } else if (mastra) {
     try {
-      const agent = mastra.getAgentById(agentId);
+      agent = mastra.getAgentById(agentId);
 
       // Restore the caller's request context from the JSON-safe snapshot on
       // the workflow input (mirrors durable-agent.ts resume handling), so
@@ -268,6 +272,7 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
       tools,
       model,
       modelList,
+      agent,
       workspace,
       memory,
       inputProcessors,
@@ -300,6 +305,7 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
     model,
     modelList,
     messageList,
+    agent,
     memory,
     saveQueueManager,
     workspace,

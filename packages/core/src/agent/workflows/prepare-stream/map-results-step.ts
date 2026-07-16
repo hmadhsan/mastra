@@ -229,6 +229,7 @@ export function createMapResultsStep<OUTPUT = undefined>({
 
     const loopOptions = {
       methodType: modelMethodType,
+      agent: capabilities.agent,
       agentId,
       requestContext: result.requestContext!,
       actor: options.actor,

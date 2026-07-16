@@ -1737,10 +1737,12 @@ export class DurableAgent<
     //    states, etc.) are left undefined — the workflow's own
     //    `resolveRuntimeDependencies` will fall back to the persisted step
     //    input to reconstruct them, so we only need the fields that the
-    //    terminal `.map(...)` step and stream adapter read from the registry:
-    //    saveQueueManager + memory + agentSpan + abortController.
+    //    terminal `.map(...)` step, stream adapter, and processor runners read
+    //    from the registry: agent + saveQueueManager + memory + agentSpan +
+    //    abortController.
     const registryEntry: any = {
       model,
+      agent: wrapped,
       memory,
       saveQueueManager,
       requestContext,
