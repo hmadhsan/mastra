@@ -115,7 +115,7 @@ import type { Step } from '../workflows/step';
 import type { OutputWriter, WorkflowResult, WorkflowRunState, WorkflowRunStatus } from '../workflows/types';
 import { waitForSuspendedSnapshot } from '../workflows/utils';
 import type { AnyWorkflow } from '../workflows/workflow';
-import { createStepFromProcessor, isProcessor } from '../workflows/workflow';
+import { bindAgentToProcessorWorkflow, createStepFromProcessor, isProcessor } from '../workflows/workflow';
 import type { AnyWorkspace } from '../workspace';
 import { createWorkspaceTools } from '../workspace';
 import { createSkillTools } from '../workspace/skills';
@@ -1503,6 +1503,7 @@ export class Agent<
       if (!workflow.type) {
         workflow.type = 'processor';
       }
+      bindAgentToProcessorWorkflow(workflow, this);
       return [workflow];
     }
 
@@ -1520,6 +1521,7 @@ export class Agent<
       if (!workflow.type) {
         workflow.type = 'processor';
       }
+      bindAgentToProcessorWorkflow(workflow, this);
       return [workflow];
     }
 
@@ -1552,6 +1554,7 @@ export class Agent<
       // Convert processor to step, or use workflow directly (nested workflows are allowed)
       let step: Step<string, unknown, any, any, any, any>;
       if (isProcessorWorkflow(processorOrWorkflow)) {
+        bindAgentToProcessorWorkflow(processorOrWorkflow, this);
         step = processorOrWorkflow;
         stateSignalProcessors.push(...(processorOrWorkflow.__stateSignalProcessors ?? []));
       } else {

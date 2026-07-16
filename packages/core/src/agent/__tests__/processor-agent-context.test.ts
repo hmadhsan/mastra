@@ -6,7 +6,9 @@ import { EventEmitterPubSub } from '../../events/event-emitter';
 import { Mastra } from '../../mastra';
 import { MockMemory } from '../../memory/mock';
 import type { ErrorProcessor, InputProcessor, OutputProcessor } from '../../processors';
+import { ProcessorStepInputSchema, ProcessorStepOutputSchema } from '../../processors/step-schema';
 import { RequestContext } from '../../request-context';
+import { createStep, createWorkflow } from '../../workflows';
 import { PUBSUB_SYMBOL } from '../../workflows/constants';
 import { Agent } from '../agent';
 import { createDurableAgent } from '../durable/create-durable-agent';
@@ -171,6 +173,41 @@ describe('processor agent context', () => {
       ]);
     },
   );
+
+  it('provides the owning agent to processors inside a prebuilt nested workflow', async () => {
+    let processorAgent: unknown;
+    const workflowProcessor: InputProcessor = {
+      id: 'nested-workflow-agent-aware-input',
+      processInput: async ({ agent, messages }) => {
+        processorAgent = agent;
+        return messages;
+      },
+    };
+    const processorWorkflow = createWorkflow({
+      id: 'agent-context-prebuilt-processor-workflow',
+      inputSchema: ProcessorStepInputSchema,
+      outputSchema: ProcessorStepOutputSchema,
+    })
+      .then(createStep(workflowProcessor))
+      .commit();
+    const agent = new Agent({
+      id: 'nested-workflow-processor-context-agent',
+      name: 'Nested workflow processor context agent',
+      instructions: 'Respond briefly.',
+      model: createTextModel(),
+      inputProcessors: [
+        {
+          id: 'direct-agent-aware-input',
+          processInput: async ({ messages }) => messages,
+        },
+        processorWorkflow,
+      ],
+    });
+
+    await agent.generate('Hello');
+
+    expect(processorAgent).toBe(agent);
+  });
 
   it.each(['generate', 'stream'] as const)(
     'provides the wrapped agent to every same-process durable processor hook during %s',
