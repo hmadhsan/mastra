@@ -209,6 +209,64 @@ describe('processor agent context', () => {
     expect(processorAgent).toBe(agent);
   });
 
+  it('keeps agents isolated when they share one prebuilt processor workflow', async () => {
+    const observedAgents = new Map<string, unknown>();
+    let resolveFirstProcessorEntered!: () => void;
+    const firstProcessorEntered = new Promise<void>(resolve => {
+      resolveFirstProcessorEntered = resolve;
+    });
+    let resolveRelease!: () => void;
+    const release = new Promise<void>(resolve => {
+      resolveRelease = resolve;
+    });
+
+    const sharedProcessor: InputProcessor = {
+      id: 'shared-workflow-agent-aware-input',
+      processInput: async ({ agent, messages }) => {
+        const owner = (agent as Agent | undefined)?.id ?? 'unknown';
+        resolveFirstProcessorEntered();
+        // Hold the first run open until the second agent has resolved its
+        // processors, to prove late binding cannot clobber an in-flight run.
+        await release;
+        observedAgents.set(owner, agent);
+        return messages;
+      },
+    };
+    const sharedWorkflow = createWorkflow({
+      id: 'shared-processor-workflow',
+      inputSchema: ProcessorStepInputSchema,
+      outputSchema: ProcessorStepOutputSchema,
+    })
+      .then(createStep(sharedProcessor))
+      .commit();
+
+    const agentA = new Agent({
+      id: 'shared-workflow-agent-a',
+      name: 'Shared workflow agent A',
+      instructions: 'Respond briefly.',
+      model: createTextModel(),
+      inputProcessors: [sharedWorkflow],
+    });
+    const agentB = new Agent({
+      id: 'shared-workflow-agent-b',
+      name: 'Shared workflow agent B',
+      instructions: 'Respond briefly.',
+      model: createTextModel(),
+      inputProcessors: [sharedWorkflow],
+    });
+
+    const generateA = agentA.generate('Hello from A');
+    await firstProcessorEntered;
+    // Resolving agent B's processors while agent A's run is mid-flight must
+    // not rebind the shared workflow away from agent A.
+    const generateB = agentB.generate('Hello from B');
+    resolveRelease();
+    await Promise.all([generateA, generateB]);
+
+    expect(observedAgents.get('shared-workflow-agent-a')).toBe(agentA);
+    expect(observedAgents.get('shared-workflow-agent-b')).toBe(agentB);
+  });
+
   it.each(['generate', 'stream'] as const)(
     'provides the wrapped agent to every same-process durable processor hook during %s',
     async method => {

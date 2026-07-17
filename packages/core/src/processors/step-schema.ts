@@ -516,60 +516,68 @@ const retryCountSchema = z.number().optional();
  * Schema for 'input' phase - processInput
  * Processes input messages before they are sent to the LLM (once at the start)
  */
-export const ProcessorInputPhaseSchema = z.object({
-  phase: z.literal('input'),
-  messages: messagesSchema,
-  messageList: messageListSchema,
-  systemMessages: systemMessagesSchema.optional(),
-  retryCount: retryCountSchema,
-});
+export const ProcessorInputPhaseSchema = z
+  .object({
+    phase: z.literal('input'),
+    messages: messagesSchema,
+    messageList: messageListSchema,
+    systemMessages: systemMessagesSchema.optional(),
+    retryCount: retryCountSchema,
+  })
+  // Preserve runtime-only fields (processorStates, abortSignal, agent) that the
+  // ProcessorRunner passes alongside schema fields when validation is enabled.
+  .passthrough();
 
 /**
  * Schema for 'inputStep' phase - processInputStep
  * Processes input messages at each step of the agentic loop.
  * Includes model/tools configuration that can be modified per-step.
  */
-export const ProcessorInputStepPhaseSchema = z.object({
-  phase: z.literal('inputStep'),
-  messages: messagesSchema,
-  messageList: messageListSchema,
-  stepNumber: z.number().describe('The current step number (0-indexed)'),
-  systemMessages: systemMessagesSchema.optional(),
-  retryCount: retryCountSchema,
-  messageId: z.string().optional().describe('The active assistant response message ID for this step'),
-  rotateResponseMessageId: z
-    .custom<() => string>()
-    .optional()
-    .describe('Rotate the active assistant response message ID when supported by the caller'),
-  // Model and tools configuration (can be modified by processors)
-  model: z.custom<ProcessorStepModelConfig>().optional().describe('Current model for this step'),
-  tools: z.custom<ProcessorStepToolsConfig>().optional().describe('Current tools available for this step'),
-  toolChoice: z.custom<ToolChoice<ToolSet>>().optional().describe('Current tool choice setting'),
-  activeTools: z.array(z.string()).optional().describe('Currently active tools'),
-  providerOptions: z.custom<SharedProviderOptions>().optional().describe('Provider-specific options'),
-  modelSettings: z
-    .custom<Omit<CallSettings, 'abortSignal'>>()
-    .optional()
-    .describe('Model settings (temperature, etc.)'),
-  structuredOutput: z
-    .custom<StructuredOutputOptions<InferStandardSchemaOutput<StandardSchemaWithJSON>>>()
-    .optional()
-    .describe('Structured output configuration'),
-  steps: z.custom<Array<StepResult<ToolSet>>>().optional().describe('Results from previous steps'),
-});
+export const ProcessorInputStepPhaseSchema = z
+  .object({
+    phase: z.literal('inputStep'),
+    messages: messagesSchema,
+    messageList: messageListSchema,
+    stepNumber: z.number().describe('The current step number (0-indexed)'),
+    systemMessages: systemMessagesSchema.optional(),
+    retryCount: retryCountSchema,
+    messageId: z.string().optional().describe('The active assistant response message ID for this step'),
+    rotateResponseMessageId: z
+      .custom<() => string>()
+      .optional()
+      .describe('Rotate the active assistant response message ID when supported by the caller'),
+    // Model and tools configuration (can be modified by processors)
+    model: z.custom<ProcessorStepModelConfig>().optional().describe('Current model for this step'),
+    tools: z.custom<ProcessorStepToolsConfig>().optional().describe('Current tools available for this step'),
+    toolChoice: z.custom<ToolChoice<ToolSet>>().optional().describe('Current tool choice setting'),
+    activeTools: z.array(z.string()).optional().describe('Currently active tools'),
+    providerOptions: z.custom<SharedProviderOptions>().optional().describe('Provider-specific options'),
+    modelSettings: z
+      .custom<Omit<CallSettings, 'abortSignal'>>()
+      .optional()
+      .describe('Model settings (temperature, etc.)'),
+    structuredOutput: z
+      .custom<StructuredOutputOptions<InferStandardSchemaOutput<StandardSchemaWithJSON>>>()
+      .optional()
+      .describe('Structured output configuration'),
+    steps: z.custom<Array<StepResult<ToolSet>>>().optional().describe('Results from previous steps'),
+  })
+  .passthrough();
 
 /**
  * Schema for 'outputStream' phase - processOutputStream
  * Processes output stream chunks with built-in state management
  */
-export const ProcessorOutputStreamPhaseSchema = z.object({
-  phase: z.literal('outputStream'),
-  part: z.unknown().nullable().describe('The current chunk being processed. Can be null to skip.'),
-  streamParts: z.array(z.unknown()).describe('All chunks seen so far'),
-  state: z.record(z.string(), z.unknown()).describe('Mutable state object that persists across chunks'),
-  messageList: messageListSchema.optional(),
-  retryCount: retryCountSchema,
-});
+export const ProcessorOutputStreamPhaseSchema = z
+  .object({
+    phase: z.literal('outputStream'),
+    part: z.unknown().nullable().describe('The current chunk being processed. Can be null to skip.'),
+    streamParts: z.array(z.unknown()).describe('All chunks seen so far'),
+    state: z.record(z.string(), z.unknown()).describe('Mutable state object that persists across chunks'),
+    messageList: messageListSchema.optional(),
+    retryCount: retryCountSchema,
+  })
+  .passthrough();
 
 /**
  * Schema for 'outputResult' phase - processOutputResult
@@ -582,37 +590,41 @@ const outputResultSchema = z.object({
   steps: z.array(z.unknown()).describe('All LLM step results'),
 });
 
-export const ProcessorOutputResultPhaseSchema = z.object({
-  phase: z.literal('outputResult'),
-  messages: messagesSchema,
-  messageList: messageListSchema,
-  retryCount: retryCountSchema,
-  result: outputResultSchema.optional(),
-});
+export const ProcessorOutputResultPhaseSchema = z
+  .object({
+    phase: z.literal('outputResult'),
+    messages: messagesSchema,
+    messageList: messageListSchema,
+    retryCount: retryCountSchema,
+    result: outputResultSchema.optional(),
+  })
+  .passthrough();
 
 /**
  * Schema for 'outputStep' phase - processOutputStep
  * Processes output after each LLM response in the agentic loop, before tool execution
  */
-export const ProcessorOutputStepPhaseSchema = z.object({
-  phase: z.literal('outputStep'),
-  messages: messagesSchema,
-  messageList: messageListSchema,
-  stepNumber: z.number().describe('The current step number (0-indexed)'),
-  finishReason: z.string().optional().describe('The finish reason from the LLM (stop, tool-use, length, etc.)'),
-  providerMetadata: z
-    .record(z.string(), z.unknown())
-    .optional()
-    .describe('Provider-specific metadata for the step (e.g. Bedrock guardrail trace under bedrock.trace.guardrail)'),
-  toolCalls: z.array(toolCallSchema).optional().describe('Tool calls made in this step (if any)'),
-  text: z.string().optional().describe('Generated text from this step'),
-  usage: z
-    .record(z.string(), z.unknown())
-    .optional()
-    .describe('Token usage for the current step (inputTokens, outputTokens, totalTokens, etc.)'),
-  systemMessages: systemMessagesSchema.optional(),
-  retryCount: retryCountSchema,
-});
+export const ProcessorOutputStepPhaseSchema = z
+  .object({
+    phase: z.literal('outputStep'),
+    messages: messagesSchema,
+    messageList: messageListSchema,
+    stepNumber: z.number().describe('The current step number (0-indexed)'),
+    finishReason: z.string().optional().describe('The finish reason from the LLM (stop, tool-use, length, etc.)'),
+    providerMetadata: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe('Provider-specific metadata for the step (e.g. Bedrock guardrail trace under bedrock.trace.guardrail)'),
+    toolCalls: z.array(toolCallSchema).optional().describe('Tool calls made in this step (if any)'),
+    text: z.string().optional().describe('Generated text from this step'),
+    usage: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe('Token usage for the current step (inputTokens, outputTokens, totalTokens, etc.)'),
+    systemMessages: systemMessagesSchema.optional(),
+    retryCount: retryCountSchema,
+  })
+  .passthrough();
 
 /**
  * Discriminated union schema for processor step input in workflows.

@@ -164,31 +164,6 @@ function isStepParams(input: unknown): input is StepParams<any, any, any, any, a
   return input !== null && typeof input === 'object' && 'id' in input && 'execute' in input && !isAgentOrTool(input);
 }
 
-const PROCESSOR_AGENT_SETTER = Symbol('processorAgentSetter');
-
-type AgentAwareProcessorStep = {
-  [PROCESSOR_AGENT_SETTER]?: (agent: Agent<any, any, any, any>) => void;
-  steps?: Record<string, StepWithComponent>;
-};
-
-/** @internal */
-export function bindAgentToProcessorWorkflow(
-  workflow: { steps: Record<string, StepWithComponent> },
-  agent: Agent<any, any, any, any>,
-): void {
-  const visited = new WeakSet<object>();
-  const visit = (step: AgentAwareProcessorStep): void => {
-    if (visited.has(step)) return;
-    visited.add(step);
-    step[PROCESSOR_AGENT_SETTER]?.(agent);
-    for (const nestedStep of Object.values(step.steps ?? {})) {
-      visit(nestedStep as AgentAwareProcessorStep);
-    }
-  };
-
-  visit(workflow);
-}
-
 function areProcessorMessageArraysEqual(before: unknown[] | undefined, after: unknown[] | undefined): boolean {
   if (before === after) {
     return true;
@@ -699,8 +674,6 @@ export function createStepFromProcessor<TProcessorId extends string>(
     getLoadedToolsForRequestContext?: (args: { requestContext: RequestContext }) => unknown | Promise<unknown>;
   };
 
-  let processorAgent = agent;
-
   // Helper to map phase to entity type
   const getProcessorEntityType = (phase: string): EntityType => {
     switch (phase) {
@@ -770,6 +743,7 @@ export function createStepFromProcessor<TProcessorId extends string>(
       const input = inputData as ProcessorStepOutput & {
         processorStates?: Map<string, ProcessorState>;
         abortSignal?: AbortSignal;
+        agent?: Agent<any, any, any, any>;
       };
       const {
         phase,
@@ -802,7 +776,14 @@ export function createStepFromProcessor<TProcessorId extends string>(
         processorStates,
         // Abort signal for cancelling in-flight processor work (e.g. OM observations)
         abortSignal,
+        // Owning agent for this run, supplied by ProcessorRunner as run input and
+        // forwarded step-to-step via passThrough (like processorStates). Resolved
+        // per run so prebuilt processor workflows shared across agents/forks never
+        // observe another agent's binding.
+        agent: runAgent,
       } = input;
+
+      const processorAgent = agent ?? runAgent;
 
       // Create a minimal abort function that throws TripWire
       const abort = (reason?: string, options?: { retry?: boolean; metadata?: unknown }): never => {
@@ -1076,6 +1057,7 @@ export function createStepFromProcessor<TProcessorId extends string>(
         streamParts,
         state: processorState,
         processorStates,
+        agent: processorAgent,
         result: outputResult,
         finishReason,
         providerMetadata,
@@ -1513,12 +1495,6 @@ export function createStepFromProcessor<TProcessorId extends string>(
     (step as ProcessorLoadedToolsProvider).getLoadedToolsForRequestContext =
       toolProvider.getLoadedToolsForRequestContext.bind(processor);
   }
-
-  Object.defineProperty(step, PROCESSOR_AGENT_SETTER, {
-    value: (nextAgent: Agent<any, any, any, any>) => {
-      processorAgent = nextAgent;
-    },
-  });
 
   return step;
 }
