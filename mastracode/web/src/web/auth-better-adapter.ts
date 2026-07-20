@@ -1,8 +1,8 @@
+import { LibsqlDialect } from '@libsql/kysely-libsql';
 import { betterAuth } from 'better-auth';
 import type { BetterAuthOptions } from 'better-auth';
 import { getMigrations } from 'better-auth/db/migration';
 import { organization } from 'better-auth/plugins';
-import { Pool } from 'pg';
 
 import type { AuthRouteSpec, WebAuthAdapter, WebAuthAdapterInitContext, WebAuthUser } from './auth-adapter.js';
 import { isCrossSiteAuth, sanitizeReturnTo } from './auth-adapter.js';
@@ -10,7 +10,7 @@ import { isCrossSiteAuth, sanitizeReturnTo } from './auth-adapter.js';
 /**
  * Self-hosted better-auth implementation of {@link WebAuthAdapter}.
  *
- * Email/password auth on the app's own Postgres — no external identity vendor
+ * Email/password auth on the app's own database — no external identity vendor
  * in the availability path. Org tenancy comes from better-auth's organization
  * plugin: `ensureOrg` mirrors the WorkOS personal-org bootstrap, so the tenant
  * identity `(orgId, userId)` resolves exactly like it does under WorkOS and
@@ -18,9 +18,9 @@ import { isCrossSiteAuth, sanitizeReturnTo } from './auth-adapter.js';
  *
  * Two construction modes:
  * - Default: pass `secret` and the adapter builds its own `betterAuth()`
- *   instance in `init()` on the factory's database (`ctx.databaseUrl`),
- *   running better-auth's programmatic migrations behind a once-per-process
- *   latch (mirrors `ensureFactoryDbReady`).
+ *   instance in `init()` on the factory storage backend's auth database
+ *   (`ctx.storage.authDatabase()`), running better-auth's programmatic
+ *   migrations behind a once-per-process latch.
  * - Bring-your-own: pass a fully-configured `instance`; the adapter mounts it
  *   as-is and leaves database/migrations to the caller.
  */
@@ -46,6 +46,7 @@ function personalOrgName(user: WebAuthUser, userId: string): string {
 /** Loose row shapes read back from better-auth's internal DB adapter. */
 interface MemberRow {
   organizationId?: string;
+  role?: string;
 }
 interface OrganizationRow {
   id: string;
@@ -92,18 +93,32 @@ export class BetterAuthWebAuth implements WebAuthAdapter {
 
   async init(ctx: WebAuthAdapterInitContext): Promise<void> {
     if (this.#instance) return; // bring-your-own instance: nothing to build
-    if (!ctx.databaseUrl) {
+    const authDb = ctx.storage?.authDatabase?.();
+    if (!authDb) {
       throw new Error(
-        'BetterAuthWebAuth needs a database: configure the MastraFactory `database` slot (or pass your own better-auth `instance`).',
+        'BetterAuthWebAuth needs a database, but the configured factory storage backend does not expose authDatabase(). ' +
+          'Use a backend that does (PgFactoryStorage, LibSQLFactoryStorage) or pass your own better-auth `instance`.',
       );
     }
+    // Map the backend's tagged auth-database handle onto better-auth's
+    // `database` option: pg pool directly, libsql via its kysely dialect,
+    // `custom` passed through as-is (the backend owns its compatibility).
+    const database: BetterAuthOptions['database'] =
+      authDb.dialect === 'postgres'
+        ? (authDb.pool as Extract<BetterAuthOptions['database'], { query: unknown }>)
+        : authDb.dialect === 'libsql'
+          ? {
+              dialect: new LibsqlDialect({ client: authDb.client } as ConstructorParameters<typeof LibsqlDialect>[0]),
+              type: 'sqlite' as const,
+            }
+          : (authDb.database as BetterAuthOptions['database']);
     const crossSite = isCrossSiteAuth();
     const allowedOrigins = ctx.allowedOrigins ?? [];
     // Widen to BetterAuthOptions before calling betterAuth(): its return type
     // is generic over the exact options object, which would make the instance
     // incompatible with the plain `Auth<BetterAuthOptions>` alias we expose.
     const options: BetterAuthOptions = {
-      database: new Pool({ connectionString: ctx.databaseUrl }),
+      database,
       secret: this.#secret,
       // All provider endpoints (sign-in/up/out/session) live under /auth/api/*,
       // which the gate treats as public like every /auth/* path.
@@ -206,6 +221,26 @@ export class BetterAuthWebAuth implements WebAuthAdapter {
    * recover via the unique slug instead of creating duplicates. Best-effort:
    * any failure is swallowed and leaves the user no-org (same as WorkOS).
    */
+  async isOrganizationAdmin(user: WebAuthUser, organizationId: string): Promise<boolean> {
+    const userId = user.id ?? user.workosId;
+    if (!userId || user.organizationId !== organizationId) return false;
+
+    try {
+      await this.#ensureDbReady();
+      const ctx = await this.instance.$context;
+      const membership = (await ctx.adapter.findOne({
+        model: 'member',
+        where: [
+          { field: 'organizationId', value: organizationId },
+          { field: 'userId', value: userId },
+        ],
+      })) as MemberRow | null;
+      return membership?.role === 'owner' || membership?.role === 'admin';
+    } catch {
+      return false;
+    }
+  }
+
   async ensureOrg(user: WebAuthUser): Promise<string | undefined> {
     if (user.organizationId) return user.organizationId;
     const userId = user.id ?? user.workosId;

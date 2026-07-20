@@ -22,19 +22,26 @@
 import type { PubSub } from '@mastra/core/events';
 import type { Mastra } from '@mastra/core/mastra';
 import type { RequestContext } from '@mastra/core/request-context';
+import type { FactoryStorage } from '@mastra/core/storage';
+import type { MastraVector } from '@mastra/core/vector';
 import { prepareAgentControllerMount } from '@mastra/code-sdk';
 import { observeAgentGitAction } from './audit/agent-audit.js';
 import type { WebAuthAdapter } from './auth-adapter.js';
 import { buildAuthRoutes, createWebAuthGate } from './auth.js';
-import {
-  createGithubSubscriptionTools,
-  parseCreatedPullRequest,
-  subscribeCurrentSessionToPullRequest,
-} from './github/session-subscriptions.js';
-import { buildLinearAgentTools } from './linear/agent-tools.js';
-import { seedRuntimeConfig } from './runtime-config.js';
-import type { WebSandboxProvider } from './sandbox-provider.js';
+import type { FactoryIntegration, IntegrationTools } from './factory-integration.js';
+import { getFactoryWorkspace } from './factory/workspace.js';
+import { parseCreatedPullRequest, subscribeCurrentSessionToPullRequest } from './github/session-subscriptions.js';
+import type { WorkspaceSandbox } from '@mastra/core/workspace';
+import { getSeededGithubIntegration, seedRuntimeConfig } from './runtime-config.js';
+import { AuditStorage } from './storage/domains/audit/base.js';
+import { ModelCredentialsStorage } from './storage/domains/credentials/base.js';
+import { createTenantCredentialPrimer, registerTenantCredentialResolver } from './tenant-credentials.js';
+import { IntakeStorage } from './storage/domains/intake/base.js';
+import { IntegrationStorage } from './storage/domains/integrations/base.js';
+import { SourceControlStorage } from './storage/domains/source-control/base.js';
+import { WorkItemsStorage } from './storage/domains/work-items/base.js';
 import { handleServerError } from './server-error.js';
+import { createStateSigner } from './state-signing.js';
 import { createSpaStaticMiddleware, resolveUiDistDir } from './spa-static.js';
 import {
   assembleWebApiRoutes,
@@ -59,18 +66,20 @@ export interface MastraFactoryConfig {
    */
   auth?: WebAuthAdapter;
   /**
-   * Postgres connection string powering BOTH agent storage (threads, messages,
-   * memory, OM, recall vectors) and the app tables (github/factory/audit/
-   * intake). Omitted → default storage resolution applies (local libSQL file)
-   * and app-DB-gated features stay off.
-   *
-   * Stays a connection string (not a storage instance) because it fans out to
-   * independently-constructed clients: the SDK mount builds its store, vector
-   * store, maintenance, and fallback from `StorageConfig`, while the app
-   * tables need a raw drizzle/pg Pool. Instance-accepting `database` is a
-   * follow-up gated on SDK storage-injection support.
+   * REQUIRED. Factory storage backend powering BOTH agent storage (threads,
+   * messages, memory, OM — via `getMastraStorage()`) and the app tables
+   * (github/factory/audit/intake — via the generic ops surface). Pass a
+   * `PgFactoryStorage` (`@mastra/pg`) for deployments or a
+   * `LibSQLFactoryStorage` (`@mastra/libsql`) for local dev — one backend,
+   * one connection, every feature on.
    */
-  database?: string;
+  storage: FactoryStorage;
+  /**
+   * Vector store instance for recall search — `PgVector` (`@mastra/pg`) on
+   * the same database as `storage`. Omitted → the SDK mount's default vector
+   * store resolution applies.
+   */
+  vector?: MastraVector;
   /**
    * Distributed event bus instance (e.g. `new RedisStreamsPubSub({ url })`).
    * When set, streams/workflows/signals ride it across processes and the
@@ -91,24 +100,84 @@ export interface MastraFactoryConfig {
    */
   allowedOrigins?: string[];
   /**
-   * Sandbox provider instance — `RailwaySandboxProvider`, `LocalSandboxProvider`, or any
-   * custom `WebSandboxProvider` implementation. GitHub-backed projects clone
-   * and run commands inside sandboxes built by this provider. Whatever instance
-   * is passed is the active provider; the factory never selects or constructs
-   * one itself. Omitted → sandboxes disabled and GitHub-backed projects stay
-   * off.
+   * Sandbox configuration. Omitted → sandboxes disabled and GitHub-backed
+   * projects stay off.
    */
-  sandbox?: WebSandboxProvider;
+  sandbox?: MastraFactorySandboxConfig;
+  /**
+   * Deployment-stable secret for signing OAuth `state` values (GitHub/Linear
+   * connect flows). Omitted → the GitHub integration's webhook secret is used
+   * when one is registered, else a per-process random secret — fine for
+   * single-process local dev but fails the boot assertion when an
+   * OAuth-signing integration is enabled on a multi-replica deploy.
+   */
+  stateSecret?: string;
+  /**
+   * Registered integrations (`GithubIntegration`, `LinearIntegration`, or any
+   * custom `FactoryIntegration`). The factory registers the pieces each
+   * instance provides — HTTP routes, storage domain, agent/session tools,
+   * diagnostics — into the system. An absent integration means its routes
+   * never mount, its tools never register, and the server boots fine.
+   */
+  integrations?: FactoryIntegration[];
+}
+
+export interface MastraFactorySandboxConfig {
+  /**
+   * Template machine — `RailwaySandbox` (`@mastra/railway`), core
+   * `LocalSandbox` (`@mastra/core/workspace`), or any `WorkspaceSandbox` that
+   * implements `clone()`. Each GitHub-backed project gets its own sandbox
+   * cloned from this machine (credentials and defaults inherited, per-project
+   * env/id overridden); the machine itself is never started. `prepare()`
+   * fails fast when the instance does not implement `clone()`.
+   */
+  machine: WorkspaceSandbox;
+  /**
+   * Base directory repos check out under (nested `owner/name` per repo).
+   * Remote sandboxes use this override or default to `/workspace`. A
+   * `LocalSandbox` always uses its host `workingDirectory`, because an
+   * in-sandbox path such as `/workspace` is not a host filesystem mount.
+   */
+  workdir?: string;
+  /**
+   * Per-replica cap on concurrently provisioned sandboxes. `0`/omitted means
+   * unlimited. A lightweight per-process budget, not a cross-replica scheduler.
+   */
+  maxSandboxes?: number;
 }
 
 const CONTROLLER_ID = 'code';
+
+/**
+ * The template sandbox's own working directory, when it exposes one as a
+ * string (core `LocalSandbox` does; remote providers generally don't).
+ * Used as the default checkout base so a local template rooted at a host
+ * directory checks repos out under that same root.
+ */
+function templateWorkingDirectory(sandbox: WorkspaceSandbox): string | undefined {
+  const wd = (sandbox as { workingDirectory?: unknown }).workingDirectory;
+  return typeof wd === 'string' && wd.length > 0 ? wd : undefined;
+}
+
+function sandboxWorkdirBase(sandbox: WorkspaceSandbox, configuredWorkdir?: string): string {
+  const templateWorkdir = templateWorkingDirectory(sandbox);
+  const workdir = sandbox.provider === 'local' ? templateWorkdir : (configuredWorkdir ?? templateWorkdir);
+  return (workdir ?? '/workspace').replace(/\/+$/, '');
+}
 
 export class MastraFactory {
   readonly #config: MastraFactoryConfig;
   #prepared: Awaited<ReturnType<typeof prepareAgentControllerMount>> | undefined;
   #preparing = false;
 
-  constructor(config: MastraFactoryConfig = {}) {
+  constructor(config: MastraFactoryConfig) {
+    if (!config?.storage) {
+      throw new Error(
+        "MastraFactory: 'storage' is required. Pass a FactoryStorage backend — e.g. " +
+          "new PgFactoryStorage({ connectionString }) from '@mastra/pg' for deployments, or " +
+          "new LibSQLFactoryStorage({ url }) from '@mastra/libsql' for local dev.",
+      );
+    }
     this.#config = config;
   }
 
@@ -126,25 +195,107 @@ export class MastraFactory {
 
     const publicOrigin = (this.#config.publicUrl ?? 'http://localhost:4111').replace(/\/+$/, '');
     const allowedOrigins = (this.#config.allowedOrigins ?? []).map(o => o.replace(/\/+$/, '')).filter(Boolean);
-    const database = this.#config.database;
+    const storage = this.#config.storage;
+    const vector = this.#config.vector;
     const pubsub = this.#config.pubsub;
     const auth = this.#config.auth;
 
-    // Seed the registry FIRST: the readiness checks below reach the app DB
-    // through `getAppDatabaseUrl()`, gate on the active auth adapter via
-    // `isWebAuthEnabled()`, and probe the sandbox provider via
+    // Registered integrations: validate ids up front so a copy-paste duplicate
+    // fails loud instead of one instance silently shadowing the other.
+    const integrations = this.#config.integrations ?? [];
+    const integrationIds = new Set<string>();
+    for (const integration of integrations) {
+      if (integrationIds.has(integration.id)) {
+        throw new Error(`MastraFactory: duplicate integration id '${integration.id}' in 'integrations'.`);
+      }
+      integrationIds.add(integration.id);
+    }
+
+    // FactoryStorage owns every app-table domain and initializes them through
+    // the same lifecycle as the backend connection.
+    storage.registerDomain(new IntakeStorage());
+    storage.registerDomain(new AuditStorage());
+    storage.registerDomain(new WorkItemsStorage());
+    storage.registerDomain(new ModelCredentialsStorage());
+    // Generic integration storage (connections/subscriptions/settings) — the
+    // default persistence surface for integrations without a bespoke domain.
+    const integrationStorage = storage.registerDomain(new IntegrationStorage());
+    const sourceControlStorage = storage.registerDomain(new SourceControlStorage());
+
+    // Multi-replica deployments (distributed pubsub configured) need
+    // cross-replica serialization; warn loud when the storage backend can't
+    // provide it so the operator knows locks are per-replica only.
+    if (pubsub && typeof storage.withDistributedLock !== 'function') {
+      process.stderr.write(
+        'MastraCode Web: pubsub is configured (multi-replica?) but the storage backend has no ' +
+          'withDistributedLock capability — project locks serialize per replica only. ' +
+          'Use PgFactoryStorage for multi-replica deployments.\n',
+      );
+    }
+
+    // Sandbox machine validation: GitHub projects need one sandbox per
+    // project, cloned from the configured machine. A machine without
+    // `clone()` would only fail at first project open — fail fast at boot
+    // instead, with the fix spelled out.
+    const sandboxConfig = this.#config.sandbox;
+    const machine = sandboxConfig?.machine;
+    if (machine && typeof machine.clone !== 'function') {
+      throw new Error(
+        `MastraFactory: the configured sandbox machine (provider '${machine.provider}') does not implement clone(). ` +
+          `GitHub-backed repositories each get their own sandbox cloned from the configured machine. ` +
+          `Pass a machine that implements clone() — e.g. RailwaySandbox (@mastra/railway) or ` +
+          `LocalSandbox (@mastra/core/workspace) — or omit 'sandbox' to disable sandboxes.`,
+      );
+    }
+
+    // Seed runtime config first: readiness checks below reach app domains
+    // through the seeded FactoryStorage, gate on the active auth adapter via
+    // `isWebAuthEnabled()`, and probe the sandbox runtime via
     // `isSandboxEnabled()`.
+    // One shared OAuth state signer per boot: explicit `stateSecret` when
+    // provided, else the GitHub integration's webhook secret (deployment-stable
+    // by construction), else a per-process random secret (`stable: false`) —
+    // the readiness checks fail loud when an OAuth-signing feature is enabled
+    // without a stable signer.
+    const githubWebhookSecret = (
+      integrations.find(integration => integration.id === 'github') as { webhookSecret?: unknown } | undefined
+    )?.webhookSecret;
+    const stateSigner = createStateSigner(
+      this.#config.stateSecret ?? (typeof githubWebhookSecret === 'string' ? githubWebhookSecret : undefined),
+    );
+
     seedRuntimeConfig({
-      databaseUrl: database,
+      storage,
+      vector,
+      integrations,
       publicUrl: publicOrigin,
       authAdapter: auth,
-      sandbox: this.#config.sandbox,
+      stateSigner,
+      sandbox: machine
+        ? {
+            machine,
+            workdirBase: sandboxWorkdirBase(machine, sandboxConfig?.workdir),
+            maxSandboxes: sandboxConfig?.maxSandboxes,
+          }
+        : undefined,
     });
 
     // One-time adapter initialization with factory-level context (e.g.
-    // better-auth builds its default instance on the app database). Failures
-    // surface here, at prepare() — a misconfigured adapter must not boot.
-    await auth?.init?.({ databaseUrl: database, publicUrl: publicOrigin, allowedOrigins });
+    // better-auth builds its default instance on the backend's auth
+    // database). Failures surface here, at prepare() — a misconfigured
+    // adapter must not boot.
+    await auth?.init?.({ storage, publicUrl: publicOrigin, allowedOrigins });
+
+    // Single init path: backend connection failure is a hard boot error;
+    // registered app domains initialize fail-soft inside FactoryStorage.
+    await storage.init();
+
+    // Authenticated requests may resolve tenant credentials, so auth makes the
+    // credentials domain a hard dependency even though other app domains remain
+    // fail-soft. Auth-less mode keeps the SDK's environment-backed fallback when
+    // the domain is unavailable.
+    if (auth) await storage.ensureDomainReady('model-credentials');
+    if (storage.isDomainReady('model-credentials')) registerTenantCredentialResolver();
 
     // GitHub App + cloud-sandbox readiness, resolved BEFORE constructing the
     // Mastra args so the github routes are simply omitted from `apiRoutes`
@@ -160,20 +311,88 @@ export class MastraFactory {
     // Factory work-item board — hangs off GitHub projects, same fail-soft pattern.
     const factoryReady = await resolveFactoryReady(githubReady);
 
+    // Per-integration readiness. The built-ins keep their composite gates
+    // (auth + app DB + signer stability); custom integrations are ready when
+    // registered, plus a successful storage-domain init when they bring one.
+    const integrationReady = new Map<string, boolean>();
+    for (const integration of integrations) {
+      if (integration.id === 'github') integrationReady.set('github', githubReady);
+      else if (integration.id === 'linear') integrationReady.set('linear', linearReady);
+      else integrationReady.set(integration.id, storage.isDomainReady('integrations'));
+    }
+    const readyIntegrations = integrations.map(integration => ({
+      integration,
+      ready: integrationReady.get(integration.id) ?? false,
+      ensureReady: async () => {
+        await storage.ensureDomainReady('integrations');
+        if (integration.id === 'github') await storage.ensureDomainReady('source-control');
+      },
+    }));
+
+    // Boot assertion: an active integration that signs OAuth `state` needs a
+    // replica-stable signer — a per-process random secret silently breaks the
+    // OAuth callback on any replica that didn't sign the state. Fail loud now
+    // instead. (The built-ins also assert this inside their readiness gates.)
+    for (const { integration } of readyIntegrations) {
+      if (integration.requiresStableStateSigner && !stateSigner.stable) {
+        throw new Error(
+          `MastraFactory: integration '${integration.id}' signs OAuth state and requires a ` +
+            `replica-stable state secret, but none is configured. Set 'stateSecret' on the ` +
+            `factory config (or register a GitHub integration with a webhook secret).`,
+        );
+      }
+    }
+
+    // Integrations contributing tools to agent sessions: org-scoped
+    // `agentTools` (resolved per request) + session-scoped `sessionTools`.
+    const toolIntegrations = readyIntegrations.filter(
+      ({ integration }) => integration.agentTools || integration.sessionTools,
+    );
+
     // Build the real production controller (agents, modes, tools, memory, OM,
     // MCP, providers) — identical to the terminal app. Agent state lives in
-    // the single app Postgres (`database`) alongside the github/app tables —
-    // one shared DB for all users, separated by `resourceId` scoping.
+    // the storage backend's Mastra store alongside the github/app tables —
+    // one shared database for all users, separated by `resourceId` scoping.
     const prepared = await prepareAgentControllerMount({
       controllerId: CONTROLLER_ID,
+      workspace: getFactoryWorkspace,
       disableGithubSignals: true,
-      ...(database ? { storage: { backend: 'pg', connectionString: database } } : {}),
-      ...(githubReady || linearReady
+      storage: storage.getMastraStorage(),
+      ...(vector ? { vector } : {}),
+      ...(toolIntegrations.length > 0
         ? {
-            extraTools: async ({ requestContext }: { requestContext: RequestContext }) => ({
-              ...(linearReady ? await buildLinearAgentTools({ requestContext }) : {}),
-              ...(githubReady ? createGithubSubscriptionTools(requestContext) : {}),
-            }),
+            extraTools: async ({ requestContext }: { requestContext: RequestContext }) => {
+              const tools: IntegrationTools = {};
+              const toolOwners = new Map<string, string>();
+              const mergeTools = (integration: FactoryIntegration, contributed: IntegrationTools) => {
+                for (const [name, tool] of Object.entries(contributed)) {
+                  const owner = toolOwners.get(name);
+                  if (owner) {
+                    throw new Error(
+                      `MastraFactory: integration tool '${name}' from '${integration.id}' conflicts with '${owner}'.`,
+                    );
+                  }
+                  toolOwners.set(name, integration.id);
+                  tools[name] = tool;
+                }
+              };
+              for (const { integration, ready, ensureReady } of toolIntegrations) {
+                if (!ready && ensureReady) {
+                  try {
+                    await ensureReady();
+                  } catch {
+                    continue;
+                  }
+                }
+                if (integration.agentTools) {
+                  mergeTools(integration, await integration.agentTools({ requestContext }));
+                }
+                if (integration.sessionTools) {
+                  mergeTools(integration, integration.sessionTools(requestContext));
+                }
+              }
+              return tools;
+            },
           }
         : {}),
       ...(githubReady
@@ -194,8 +413,9 @@ export class MastraFactory {
               if (requestContext) {
                 await observeAgentGitAction({ ...context, context: requestContext });
               }
-              if (pullRequestUrl && requestContext) {
-                await subscribeCurrentSessionToPullRequest(requestContext, pullRequestUrl, 'auto-gh-pr-create');
+              const github = getSeededGithubIntegration();
+              if (pullRequestUrl && requestContext && github) {
+                await subscribeCurrentSessionToPullRequest(requestContext, pullRequestUrl, 'auto-gh-pr-create', github);
               }
             },
           }
@@ -207,13 +427,16 @@ export class MastraFactory {
         // Hono app the deployer generates. `requiresAuth: false`; the gate
         // skips `/auth/*`.
         ...(auth ? buildAuthRoutes(auth) : []),
-        // Custom `/web/*` routes (fs / config / github / factory / audit).
+        // Custom `/web/*` routes (fs / config / integrations / factory / audit).
         ...assembleWebApiRoutes({
+          controllerId: CONTROLLER_ID,
           controller,
           authStorage,
           publicOrigin,
-          githubReady,
-          linearReady,
+          stateSigner,
+          integrationStorage,
+          sourceControlStorage,
+          integrations: readyIntegrations,
           intakeReady,
           factoryReady,
         }),
@@ -236,11 +459,13 @@ export class MastraFactory {
 
         // Ordered middleware. The deployer applies these AFTER its context
         // middleware sets `c.set('mastra', mastra)` and BEFORE routes, so:
-        //   1. gate  — validates the auth session, stashes the user, and 401s /
-        //              redirects unauthenticated requests. Skips public `/auth/*`.
-        //   2. spa   — serves the built UI for everything the server doesn't own.
+        //   1. gate   — validates the auth session, stashes the user, and 401s /
+        //               redirects unauthenticated requests. Skips public `/auth/*`.
+        //   2. primer — hydrates the caller's model-credential snapshot so the
+        //               request's first model call resolves tenant credentials.
+        //   3. spa    — serves the built UI for everything the server doesn't own.
         return {
-          middleware: [createWebAuthGate(auth), ...spa],
+          middleware: [createWebAuthGate(auth), createTenantCredentialPrimer(), ...spa],
           ...cors,
           ...onError,
         };

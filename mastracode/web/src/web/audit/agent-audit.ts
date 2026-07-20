@@ -20,7 +20,7 @@ import type { RequestContext } from '@mastra/core/request-context';
 import type { WebAuthUser } from '../auth';
 import { getWebAuthOrgId, getWebAuthUserId } from '../auth';
 import { parseCreatedPullRequest, stripHeredocBodies } from '../github/session-subscriptions';
-import type { AuditTarget } from './schema';
+import type { AuditTarget } from '../storage/domains/audit/base';
 import { recordAuditEvent } from './store';
 import { forwardToWorkOS } from './workos-sink';
 
@@ -103,8 +103,7 @@ export async function observeAgentGitAction(toolContext: ToolObserverContext): P
     const command = stripHeredocBodies(rawCommand);
 
     const controller = toolContext.context.get('controller') as
-      | AgentControllerRequestContext<GithubSessionState>
-      | undefined;
+      AgentControllerRequestContext<GithubSessionState> | undefined;
     const worktreePath = controller?.scope;
 
     if (GIT_COMMIT_RE.test(command)) {

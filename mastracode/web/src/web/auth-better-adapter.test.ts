@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { LibSQLFactoryStorage } from '@mastra/libsql';
+import { PgFactoryStorage } from '@mastra/pg';
 import type { BetterAuthInstance } from './auth-better-adapter.js';
 import { BetterAuthWebAuth } from './auth-better-adapter.js';
 
@@ -92,13 +94,22 @@ describe('construction and init', () => {
     // SPA deploys must have their origins forwarded.
     const adapter = new BetterAuthWebAuth({ secret: 's3cret' });
     await adapter.init?.({
-      databaseUrl: 'postgres://user:pw@localhost:5432/app',
+      storage: new PgFactoryStorage({ connectionString: 'postgres://user:pw@localhost:5432/app' }),
       publicUrl: 'https://api.acme.com',
       allowedOrigins: ['https://app.acme.com'],
     });
     expect((adapter.instance as { options: { trustedOrigins?: unknown } }).options.trustedOrigins).toEqual([
       'https://app.acme.com',
     ]);
+  });
+
+  it('builds the default instance on a libsql auth database via the kysely dialect', async () => {
+    const adapter = new BetterAuthWebAuth({ secret: 's3cret' });
+    await adapter.init?.({
+      storage: new LibSQLFactoryStorage({ url: ':memory:' }),
+      publicUrl: 'https://api.acme.com',
+    });
+    expect(adapter.instance).toBeDefined();
   });
 });
 
@@ -165,6 +176,46 @@ describe('authenticate', () => {
     const adapter = new BetterAuthWebAuth({ instance });
     const user = await adapter.authenticate('', new Request('http://localhost/web/x'));
     expect(user?.organizationId).toBe('org_active');
+  });
+});
+
+describe('isOrganizationAdmin', () => {
+  const user = { id: 'user_1', organizationId: 'org_1' };
+
+  it.each(['owner', 'admin'])('allows the %s role', async role => {
+    const dbAdapter = mockDbAdapter({
+      findOne: vi.fn(async () => ({ organizationId: 'org_1', role })),
+    });
+    const { instance } = mockInstance({ dbAdapter });
+    const adapter = new BetterAuthWebAuth({ instance });
+
+    await expect(adapter.isOrganizationAdmin(user, 'org_1')).resolves.toBe(true);
+    expect(dbAdapter.findOne).toHaveBeenCalledWith({
+      model: 'member',
+      where: [
+        { field: 'organizationId', value: 'org_1' },
+        { field: 'userId', value: 'user_1' },
+      ],
+    });
+  });
+
+  it('denies member roles and cross-organization requests', async () => {
+    const dbAdapter = mockDbAdapter({
+      findOne: vi.fn(async () => ({ organizationId: 'org_1', role: 'member' })),
+    });
+    const { instance } = mockInstance({ dbAdapter });
+    const adapter = new BetterAuthWebAuth({ instance });
+
+    await expect(adapter.isOrganizationAdmin(user, 'org_1')).resolves.toBe(false);
+    await expect(adapter.isOrganizationAdmin(user, 'org_2')).resolves.toBe(false);
+  });
+
+  it('fails closed when membership lookup fails', async () => {
+    const dbAdapter = mockDbAdapter({ findOne: vi.fn(async () => Promise.reject(new Error('db down'))) });
+    const { instance } = mockInstance({ dbAdapter });
+    const adapter = new BetterAuthWebAuth({ instance });
+
+    await expect(adapter.isOrganizationAdmin(user, 'org_1')).resolves.toBe(false);
   });
 });
 
